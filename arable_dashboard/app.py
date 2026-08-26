@@ -17,7 +17,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from config import TRACKED_PARAMETERS, GAP_THRESHOLD_HOURS, ARABLE_API_KEY
-from db import list_devices, get_readings
+from db import init_db, list_devices, get_readings
 from gap_analysis import device_status, find_gaps
 
 st.set_page_config(page_title="Arable Network Dashboard", layout="wide")
@@ -150,6 +150,8 @@ def render_site_detail(devices_df: pd.DataFrame):
 
 
 def main():
+    init_db()  # make sure devices/readings tables exist before anything queries them
+
     st.title("🌍 Arable Sensor Network Dashboard")
     st.caption(f"Gap threshold: {GAP_THRESHOLD_HOURS}h missing = flagged gap. Data source: local SQLite (synced from Arable API).")
 
