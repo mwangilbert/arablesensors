@@ -16,7 +16,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from config import TRACKED_PARAMETERS, GAP_THRESHOLD_HOURS, ARABLE_API_KEY
+from config import TRACKED_PARAMETERS, GAP_THRESHOLD_HOURS, ARABLE_API_KEY, ARABLE_API_KEY_DEBUG
 from db import init_db, list_devices, get_readings
 from gap_analysis import device_status, find_gaps
 
@@ -46,16 +46,24 @@ def sync_from_arable():
     """Pull the newest readings from the real Arable API, at most once per
     hour (shared across every visitor while this cache entry is valid).
     No-ops quietly if no API key is configured, so the mock-data demo
-    still works untouched."""
+    still works untouched. Never raises -- returns a status string so the
+    dashboard can show what happened instead of crashing."""
     if not ARABLE_API_KEY:
         return "no_key"
     from arable_client import ArableClient
     from ingest import sync_devices, sync_readings
 
-    client = ArableClient()
-    device_ids = sync_devices(client)
-    sync_readings(client, device_ids)
-    return "synced"
+    try:
+        client = ArableClient()
+        device_ids = sync_devices(client)
+        sync_readings(client, device_ids)
+        return "synced"
+    except Exception as e:
+        # Includes HTTP errors from Arable (401 bad key, 403 forbidden, etc.)
+        # str(e) for requests' HTTPError includes the status code + reason,
+        # and never includes the API key itself (it's sent as a header, not
+        # in the URL), so it's safe to show directly.
+        return f"error: {type(e).__name__}: {e}"
 
 
 def compute_fleet_status(devices):
@@ -166,6 +174,11 @@ def main():
     if sync_result == "no_key":
         st.info("No ARABLE_API_KEY configured — showing whatever is already in the local database "
                 "(e.g. mock data). Add the secret to pull live data.", icon="ℹ️")
+    elif sync_result and sync_result.startswith("error"):
+        st.error(f"Sync from Arable failed: {sync_result}", icon="🚫")
+
+    with st.expander("🔧 Debug: API key detection", expanded=(sync_result != "synced")):
+        st.json(ARABLE_API_KEY_DEBUG)
     load_devices.clear()  # pick up anything sync_from_arable just wrote
 
     devices = load_devices()

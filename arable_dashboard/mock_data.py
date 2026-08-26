@@ -52,16 +52,14 @@ def simulate_value(param, t: datetime, lat: float):
         base = 24 - abs(lat) * 0.3
         return round(base + 8 * math.sin((day_frac - 0.25) * 2 * math.pi) + seasonal * 2 + random.gauss(0, 0.6), 2)
     if param == "rh":
-        return round(min(100, max(20, 60 + 25 * math.cos((day_frac - 0.25) * 2 * math.pi) + random.gauss(0, 4))), 1)
+        return round(min(1.0, max(0.2, 0.60 + 0.25 * math.cos((day_frac - 0.25) * 2 * math.pi) + random.gauss(0, 0.04))), 3)
     if param == "precip":
         return round(max(0, random.gauss(0, 1) if random.random() > 0.9 else 0), 2)
     if param == "slp":
         return round(101.3 + random.gauss(0, 0.15), 2)
-    if param == "par":
+    if param == "pardw":
         daylight = max(0, math.sin((day_frac - 0.25) * 2 * math.pi))
         return round(daylight * 1800 + random.gauss(0, 30), 1)
-    if param == "moisture_0_mean":
-        return round(min(45, max(5, 22 + 5 * math.sin(t.timetuple().tm_yday / 20) + random.gauss(0, 1))), 2)
     return round(random.gauss(0, 1), 2)
 
 
