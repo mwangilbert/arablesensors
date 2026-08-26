@@ -42,6 +42,20 @@ CREATE INDEX IF NOT EXISTS idx_battery_device_time ON battery_readings (device_i
 """
 
 
+DEVICE_COLUMNS = {
+    "site_name": "TEXT",
+    "status": "TEXT",
+    "country": "TEXT",
+    "region": "TEXT",
+    "org": "TEXT",
+    "lat": "REAL",
+    "lon": "REAL",
+    "install_date": "TEXT",
+    "match_type": "TEXT",
+    "note": "TEXT",
+}
+
+
 @contextmanager
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
@@ -53,9 +67,20 @@ def get_conn():
         conn.close()
 
 
+def _migrate_devices_table(conn):
+    # CREATE TABLE IF NOT EXISTS is a no-op on a pre-existing devices table,
+    # so an older on-disk db (fewer columns) is patched up to the current
+    # schema here instead of failing with "no such column" at query time.
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(devices)")}
+    for column, col_type in DEVICE_COLUMNS.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE devices ADD COLUMN {column} {col_type}")
+
+
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        _migrate_devices_table(conn)
 
 
 def upsert_device(conn, device_id, site_name, status, country, region, org, lat, lon,
