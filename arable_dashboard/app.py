@@ -3,9 +3,10 @@ Arable Sensor Network Dashboard
 
 Views:
   1. Overview     - map of every site (click to select), fleet health summary
-  2. Site Detail  - selected site's trends per parameter + battery, with a
-                     flexible time window and % reporting per parameter
-  3. Compare      - cross-site data-availability and battery comparison
+  2. Site Detail  - selected site's trends, every parameter on one combined
+                     chart, with a flexible time window and % reporting per
+                     parameter
+  3. Compare      - cross-site data-availability comparison
 
 Run:
     streamlit run app.py
@@ -18,7 +19,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from config import TRACKED_PARAMETERS, GAP_THRESHOLD_HOURS, ARABLE_API_KEY, ARABLE_API_KEY_DEBUG
-from db import init_db, list_devices, get_readings, get_battery_readings, get_conn, upsert_battery_reading
+from db import init_db, list_devices, get_readings
 from gap_analysis import device_status, find_gaps
 
 st.set_page_config(page_title="Arable Network Dashboard", layout="wide", page_icon="🛰️")
@@ -40,6 +41,21 @@ STATUS_COLORS = {
     "Offline": "#C1443C",
     "No Data": "#9AA5A0",
 }
+# One distinct color per tracked parameter, deliberately clear of the status
+# palette above (no red/green/amber) so a parameter's color is never mistaken
+# for a health signal.
+PARAM_COLORS = {
+    "tair": "#1F6F6F",     # teal
+    "rh": "#3B6FB6",       # blue
+    "precip": "#7A4FB5",   # purple
+    "slp": "#B5651D",      # rust
+    "pardw": "#C2568B",    # magenta
+}
+_PARAM_COLOR_FALLBACKS = ["#1F6F6F", "#3B6FB6", "#7A4FB5", "#B5651D", "#C2568B", "#4C7A3D", "#8A8A3C"]
+
+
+def param_color(param: str, index: int) -> str:
+    return PARAM_COLORS.get(param, _PARAM_COLOR_FALLBACKS[index % len(_PARAM_COLOR_FALLBACKS)])
 
 CUSTOM_CSS = f"""
 <style>
@@ -228,6 +244,80 @@ def render_overview(devices_df: pd.DataFrame):
     st.markdown(table_df.to_html(escape=False, index=False), unsafe_allow_html=True)
 
 
+def _stacked_axis_layout(n: int, step: float = 0.07):
+    """Positions for n y-axes sharing one x-axis, alternating left/right and
+    stepping further out for each extra axis on the same side. Returns
+    (per-axis kwargs list, xaxis domain) -- the domain is narrowed so the
+    outer axes have room to sit outside the plot area instead of overlapping it."""
+    sides = ["left" if i % 2 == 0 else "right" for i in range(n)]
+    extra_left = max(0, sides.count("left") - 1)
+    extra_right = max(0, sides.count("right") - 1)
+    domain_left = extra_left * step
+    domain_right = 1 - extra_right * step
+
+    layout = []
+    for i, side in enumerate(sides):
+        before = sides[:i].count(side)
+        if before == 0:
+            layout.append({"side": side, "anchor": "x", "position": None})
+        else:
+            position = (domain_left - before * step) if side == "left" else (domain_right + before * step)
+            layout.append({"side": side, "anchor": "free", "position": position})
+    return layout, (domain_left, domain_right)
+
+
+def render_parameter_trends(device_id: str, start, end, param_data: list[dict]):
+    """One chart, every tracked parameter as its own trace on its own
+    color-matched axis -- so a healthy station shows every line moving, and a
+    flat or absent line points straight at what stopped reporting."""
+    n = len(param_data)
+    axis_layout, (domain_left, domain_right) = _stacked_axis_layout(n)
+
+    fig = go.Figure()
+    layout_kwargs = {"xaxis": dict(domain=[domain_left, domain_right])}
+    any_reading = False
+
+    for i, item in enumerate(param_data):
+        color = param_color(item["param"], i)
+        axis_key = "yaxis" if i == 0 else f"yaxis{i + 1}"
+        trace_axis = "y" if i == 0 else f"y{i + 1}"
+        al = axis_layout[i]
+
+        axis_kwargs = dict(
+            title=dict(text=f"{item['label']} ({item['unit']})", font=dict(color=color, size=11)),
+            tickfont=dict(color=color, size=10),
+            linecolor=color, tickcolor=color, ticks="outside",
+            showgrid=(i == 0), zeroline=False, side=al["side"],
+        )
+        if i > 0:
+            axis_kwargs["overlaying"] = "y"
+        if al["anchor"] == "free":
+            axis_kwargs["anchor"] = "free"
+            axis_kwargs["position"] = al["position"]
+        layout_kwargs[axis_key] = axis_kwargs
+
+        if item["rows"]:
+            any_reading = True
+            df = pd.DataFrame(item["rows"])
+            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            fig.add_trace(go.Scatter(
+                x=df["timestamp"], y=df["value"], mode="lines",
+                name=f"{item['label']} ({item['unit']})",
+                line=dict(width=2, color=color), yaxis=trace_axis,
+            ))
+
+    fig.update_layout(
+        **layout_kwargs,
+        margin=dict(l=10, r=10, t=10, b=10), height=440,
+        plot_bgcolor=CARD_BG, paper_bgcolor=CARD_BG,
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    st.plotly_chart(fig, width='stretch')
+    if not any_reading:
+        st.info("No data in this window for any tracked parameter.")
+
+
 # ---------------------------------------------------------------------------
 def render_site_detail(devices_df: pd.DataFrame):
     st.subheader("Site Detail")
@@ -258,64 +348,33 @@ def render_site_detail(devices_df: pd.DataFrame):
     if window == "Since installation" and not row.get("install_date"):
         st.caption("No confirmed install date on file for this device — defaulted to the last 365 days.")
 
-    st.markdown("#### Reporting completeness this window")
-    param_cols = st.columns(len(TRACKED_PARAMETERS))
-    for col, (param, (label, unit)) in zip(param_cols, TRACKED_PARAMETERS.items()):
-        completeness, _ = find_gaps(device_id, param, start, end)
-        col.metric(label, f"{completeness:.0f}%")
-
+    param_data = []
     for param, (label, unit) in TRACKED_PARAMETERS.items():
         rows = get_readings(device_id, param, start.isoformat(), end.isoformat())
         completeness, gaps = find_gaps(device_id, param, start, end)
+        param_data.append({
+            "param": param, "label": label, "unit": unit,
+            "rows": rows, "completeness": completeness, "gaps": gaps,
+        })
 
-        with st.expander(f"{label} ({unit}) — {completeness:.0f}% complete, {len(gaps)} gap(s)", expanded=(param == "tair")):
-            if not rows:
-                st.info("No data in this window.")
-                continue
-            df = pd.DataFrame(rows)
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
+    st.markdown("#### Reporting completeness this window")
+    param_cols = st.columns(len(param_data))
+    for col, item in zip(param_cols, param_data):
+        col.metric(item["label"], f"{item['completeness']:.0f}%")
 
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df["timestamp"], y=df["value"], mode="lines",
-                                      name=label, line=dict(width=2, color=ACCENT)))
-            for gap in gaps:
-                fig.add_vrect(x0=gap["start"], x1=gap["end"] + timedelta(minutes=59),
-                              fillcolor=STATUS_COLORS["Offline"], opacity=0.12, line_width=0,
-                              annotation_text=f"{gap['hours']}h gap", annotation_position="top left")
-            fig.update_layout(margin=dict(l=10, r=10, t=30, b=10), height=260,
-                               yaxis_title=unit, showlegend=False,
-                               plot_bgcolor=CARD_BG, paper_bgcolor=CARD_BG)
-            st.plotly_chart(fig, width='stretch')
-            if gaps:
-                st.dataframe(pd.DataFrame(gaps), hide_index=True, width='stretch')
+    st.markdown("#### All parameters, one timeline")
+    st.caption("Every tracked parameter plotted together, each on its own color-matched scale — "
+               "a working station shows every line moving; a flat or missing line points straight "
+               "at what stopped reporting.")
+    render_parameter_trends(device_id, start, end, param_data)
 
-    st.markdown("#### Battery")
-    batt_rows = get_battery_readings(device_id, start.isoformat(), end.isoformat())
-    if batt_rows:
-        bdf = pd.DataFrame(batt_rows)
-        bdf["timestamp"] = pd.to_datetime(bdf["timestamp"])
-        fig = go.Figure()
-        for source, sub in bdf.groupby("source"):
-            fig.add_trace(go.Scatter(x=sub["timestamp"], y=sub["battery_pct"], mode="lines+markers",
-                                      name=source, line=dict(width=2)))
-        fig.update_layout(margin=dict(l=10, r=10, t=20, b=10), height=240,
-                           yaxis_title="%", yaxis_range=[0, 100],
-                           plot_bgcolor=CARD_BG, paper_bgcolor=CARD_BG)
-        st.plotly_chart(fig, width='stretch')
-    else:
-        st.info("No battery data yet for this window. Arable's public API doesn't confirm a battery field, "
-                "so log a reading manually below (e.g. after a site visit).")
-
-    with st.form(key=f"battery_log_{device_id}"):
-        c1, c2 = st.columns([2, 1])
-        pct = c1.slider("Battery level observed (%)", 0, 100, 80)
-        submit = c2.form_submit_button("Log reading")
-        if submit:
-            with get_conn() as conn:
-                upsert_battery_reading(conn, device_id, datetime.now(timezone.utc).isoformat(),
-                                        float(pct), "manual", f"{pct}%")
-            st.success(f"Logged {pct}% for {device_id}.")
-            st.rerun()
+    gap_rows = [
+        {"Parameter": item["label"], "Gap start": g["start"], "Gap end": g["end"], "Hours": g["hours"]}
+        for item in param_data for g in item["gaps"]
+    ]
+    if gap_rows:
+        with st.expander(f"Gap details ({len(gap_rows)})"):
+            st.dataframe(pd.DataFrame(gap_rows), hide_index=True, width='stretch')
 
 
 # ---------------------------------------------------------------------------
@@ -349,21 +408,6 @@ def render_compare(devices_df: pd.DataFrame):
                        xaxis_title="% reporting", plot_bgcolor=CARD_BG, paper_bgcolor=CARD_BG)
     st.plotly_chart(fig, width='stretch')
 
-    st.markdown("#### Battery snapshot (latest reading per site)")
-    batt_rows = []
-    for _, d in devices_df.iterrows():
-        if pd.isna(d["lat"]):
-            continue
-        hist = get_battery_readings(d["device_id"])
-        latest = hist[-1] if hist else None
-        batt_rows.append({
-            "Site": d["site_name"], "Device": d["device_id"],
-            "Battery %": latest["battery_pct"] if latest else None,
-            "As of": latest["timestamp"] if latest else "—",
-        })
-    st.dataframe(pd.DataFrame(batt_rows).sort_values("Battery %", na_position="first"),
-                 hide_index=True, width='stretch')
-
 
 # ---------------------------------------------------------------------------
 def main():
@@ -371,7 +415,7 @@ def main():
     st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
     st.markdown(
         "<div class='tahmo-banner'><h1>🛰️ Arable Sensor Network Dashboard</h1>"
-        "<p>Live status, data completeness, and battery health across every installed site.</p></div>",
+        "<p>Live status and data completeness across every installed site.</p></div>",
         unsafe_allow_html=True,
     )
 
