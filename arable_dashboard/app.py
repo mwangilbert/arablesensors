@@ -209,6 +209,36 @@ div[data-testid="stExpander"] {{
     border: 1px solid {HAIRLINE};
     border-radius: 8px;
 }}
+
+/* Wide HTML tables (Overview) scroll horizontally inside their own box
+   instead of forcing the whole page to scroll sideways on a phone. */
+.table-scroll {{
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    border: 1px solid {HAIRLINE};
+    border-radius: 8px;
+}}
+.table-scroll table {{
+    border-collapse: collapse;
+    width: 100%;
+}}
+.table-scroll th, .table-scroll td {{
+    padding: 6px 12px;
+    white-space: nowrap;
+}}
+
+/* Phone-width tightening -- smaller header/cards/legend so the layout
+   doesn't feel oversized on a narrow screen. */
+@media (max-width: 640px) {{
+    .app-header {{ flex-wrap: wrap; padding: 4px 0 10px 0; }}
+    .app-header-title {{ font-size: 1.02rem; }}
+    .app-header-sub {{ font-size: 0.78rem; }}
+    .section-title {{ font-size: 0.95rem; margin: 14px 0 8px 0; }}
+    .metric-card {{ padding: 8px 10px 10px 10px; }}
+    .metric-card .mc-value {{ font-size: 1.25rem; }}
+    .legend-row {{ gap: 12px; }}
+    .legend-chip {{ font-size: 0.78rem; }}
+}}
 </style>
 """
 
@@ -378,7 +408,10 @@ def render_overview(devices_df: pd.DataFrame):
     table_df = pd.DataFrame(rows).sort_values("Reporting (24h)", na_position="first")
     table_df["Status"] = table_df["Status"].apply(status_pill_html)
     table_df["Reporting (24h)"] = table_df["Reporting (24h)"].apply(signal_bars_html)
-    st.markdown(table_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+    st.markdown(
+        f"<div class='table-scroll'>{table_df.to_html(escape=False, index=False)}</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _stacked_axis_layout(n: int, step: float = 0.07):
@@ -469,7 +502,7 @@ def render_site_detail(devices_df: pd.DataFrame):
     device_id = st.selectbox("Site", options=device_ids, index=default_idx, format_func=lambda x: site_labels[x])
     st.session_state["selected_device"] = device_id
 
-    window = st.radio("Time window", WINDOW_OPTIONS, horizontal=True, index=2)
+    window = st.selectbox("Time window", WINDOW_OPTIONS, index=2, key="site_detail_window")
 
     row = devices_df[devices_df["device_id"] == device_id].iloc[0]
     start, end = resolve_window(window, row.get("install_date"))
@@ -525,7 +558,7 @@ def render_compare(devices_df: pd.DataFrame):
     c1, c2 = st.columns(2)
     param = c1.selectbox("Parameter", options=list(TRACKED_PARAMETERS.keys()),
                           format_func=lambda p: TRACKED_PARAMETERS[p][0])
-    window = c2.selectbox("Time window", options=WINDOW_OPTIONS, index=2)
+    window = c2.selectbox("Time window", options=WINDOW_OPTIONS, index=2, key="compare_window")
 
     rows = []
     for _, d in devices_df.iterrows():
